@@ -122,6 +122,14 @@ class SimpleSwitch13(app_manager.RyuApp):
         self.mac_to_port = {}
         self.datapaths = {}
         self.datapaths_id = []
+        self.lldp_pkt_cnt = 0
+        self.traffic_cnt = 0
+        self.packet_out_cnt = 0
+        self.output = open('timeWithoutTraffic.txt','w')
+        self.timeCnt = 0
+        self.tStart = 0
+        self.tEnd = 0
+        self.port_desc = []
         self.monitor_thread = hub.spawn(self._monitor)
 
 
@@ -135,11 +143,13 @@ class SimpleSwitch13(app_manager.RyuApp):
         parser = datapath.ofproto_parser
         sw_id = datapath.id
 
+
     #switch state change event handler
     @set_ev_cls(ofp_event.EventOFPStateChange,
                 [MAIN_DISPATCHER, DEAD_DISPATCHER])
     def _state_change_handler(self, ev):
         datapath = ev.datapath
+
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         match = parser.OFPMatch(eth_dst= '01:80:c2:00:00:0e',eth_type=0x88cc)
@@ -149,33 +159,51 @@ class SimpleSwitch13(app_manager.RyuApp):
                 self.logger.info('register datapath: %016d', datapath.id)
                 self.datapaths[datapath.id] = datapath
                 self.datapaths_id.append(datapath.id)
+                print self.datapaths_id
                 actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)]
                 self.add_flow(datapath,65535,match,actions)
-                self.add_flow(datapath,65535,parser.OFPMatch(),actions)
+                #self.add_flow(datapath,65535,parser.OFPMatch(),actions)
 
 
         elif ev.state == DEAD_DISPATCHER:
             if datapath.id in self.datapaths:
                 self.logger.info('unregister datapath: %016d', datapath.id)
                 del self.datapaths[datapath.id]
+                self.traffic_cnt = 0
 
     def _monitor(self):
         while True:
+            self.tStart = time.time()
             self._request_stats()
+
+            #print end-start
+
+
+            self.timeCnt +=1
             hub.sleep(1)
+            self.lldp_pkt_cnt =0
+            self.packet_out_cnt = 0
 
     def _request_stats(self):
         if len(self.datapaths) >0:
-                #i is the index of switches
                 for i in range(0,len(self.datapaths),1):
-                    # j is the index of ports set,the total -1 is the last port is virtual port
+                    print "dpid: "+str(self.datapaths[self.datapaths_id[i]].id)
+                    #port_desc = str(self.datapaths[self.datapaths_id[i]].ports[])
+                    #print self.datapaths[self.datapaths_id[i]].ports.values()[0][0]
+
                     for j in range(0,len(self.datapaths[self.datapaths_id[i]].ports)-1,1):
+                        #print "dpid:"+str(self.datapaths[i].id)+" p:"+str(self.datapaths[i].ports[j][0])
                         port_no = self.datapaths[self.datapaths_id[i]].ports.values()[j][0]
                         port_haddr = self.datapaths[self.datapaths_id[i]].ports.values()[j][1]
+                        print port_no,port_haddr
+
                         actions = [self.datapaths[self.datapaths_id[i]].ofproto_parser.OFPActionOutput(port_no)]
-                        #send lldp packet to specify switch
-                        self.lldp_send(self.datapaths[self.datapaths_id[i]],int(port_no),
+                        self.send_packetOut(self.datapaths[self.datapaths_id[i]],int(port_no),
                                             str(port_haddr),actions)
+                        self.packet_out_cnt +=1
+
+
+                #self.send_barrier_request(self.datapaths[self.datapaths_id[i]])
 
     def add_flow(self, datapath, priority, match, actions, buffer_id=None):
         ofproto = datapath.ofproto
@@ -192,7 +220,7 @@ class SimpleSwitch13(app_manager.RyuApp):
                                     match=match, instructions=inst)
         datapath.send_msg(mod)
 
-    def lldp_send(self,dp,port_no, dl_addr,actions):
+    def send_packetOut(self,dp,port_no, dl_addr,actions):
         out = dp.ofproto_parser.OFPPacketOut(
             datapath=dp,
             in_port=dp.ofproto.OFPP_CONTROLLER,
@@ -201,6 +229,17 @@ class SimpleSwitch13(app_manager.RyuApp):
             data=LLDPPacket.lldp_packet(dp.id,port_no,dl_addr,120))
         dp.send_msg(out)
 
+    def send_barrier_request(self, datapath):
+        ofp_parser = datapath.ofproto_parser
+
+        req = ofp_parser.OFPBarrierRequest(datapath)
+        datapath.send_msg(req)
+
+    @set_ev_cls(ofp_event.EventOFPBarrierReply, MAIN_DISPATCHER)
+    def barrier_reply_handler(self, ev):
+        self.logger.info('OFPBarrierReply received')
+        self.tEnd = time.time()
+        self.logger.info(self.tEnd-self.tStart)
 
 
 
@@ -222,15 +261,36 @@ class SimpleSwitch13(app_manager.RyuApp):
 
         if eth.ethertype == ether_types.ETH_TYPE_LLDP:
             # ignore lldp packet
-            print eth.ethertype
+            '''
+            self.lldp_pkt_cnt +=1
+            if self.lldp_pkt_cnt == 8:
+                self.tEnd = time.time()
+                self.output.write(str(self.timeCnt)+','+str(self.tEnd-self.tStart)+'\n')
+            #print self.lldp_pkt_cnt
+            '''
             return
         dst = eth.dst
         src = eth.src
+        '''
+        if src == '00:00:00:00:00:01' and dst == '00:00:00:00:00:02':
+            #print self.traffic_cnt
+
+
+            self.traffic_cnt+=1
+            if self.traffic_cnt == 1:
+                self.tStart = time.time()
+            elif self.traffic_cnt == 2:
+                self.tEnd = time.time()
+                print self.tEnd-self.tStart
+                self.traffic_cnt = 0
+
+            return
+        '''
 
         dpid = datapath.id
         self.mac_to_port.setdefault(dpid, {})
 
-        self.logger.debug("packet in %s %s %s %s", dpid, src, dst, in_port)
+        #self.logger.info("packet in %s %s %s %s", dpid, src, dst, in_port)
 
         # learn a mac address to avoid FLOOD next time.
         self.mac_to_port[dpid][src] = in_port
@@ -241,6 +301,7 @@ class SimpleSwitch13(app_manager.RyuApp):
             out_port = ofproto.OFPP_FLOOD
 
         actions = [parser.OFPActionOutput(out_port)]
+        actions1 = [None]
 
         # install a flow to avoid packet_in next time
         if out_port != ofproto.OFPP_FLOOD:
