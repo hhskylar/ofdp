@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-#last updata:2016/12/13
+#last updata:2016/01/10
 #author:Eason Chang
-#OFDP
+#OFDP topology discovery app
 
-#-----------------import libary------------------------
+#-----------------import python libary-------------------------------------
 import logging
 import six
 import struct
@@ -11,19 +11,17 @@ import time
 import json
 import math
 
+#------------------import ryu libary-----------------------------------------
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
 from ryu.controller.handler import MAIN_DISPATCHER, DEAD_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
-#from ryu.controller import dpset
-#from ryu.topology import api
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import ether_types
 from ryu.lib import hub
-
 from ryu.exception import RyuException
 from ryu.lib import addrconv, hub
 from ryu.lib.mac import DONTCARE_STR
@@ -37,12 +35,9 @@ from ryu.ofproto import ofproto_v1_0
 from ryu.ofproto import ofproto_v1_2
 from ryu.ofproto import ofproto_v1_3
 from ryu.ofproto import ofproto_v1_4
-from ryu.lib import hub
-# from ryu.topology import event, switches
-# from ryu.topology.api import get_switch, get_link
 
 
-
+#----------Link Layer Discovery Protocol Class-----------------
 class LLDPPacket(object):
     # make a LLDP packet for link discovery.
     '''
@@ -112,7 +107,7 @@ class LLDPPacket(object):
         src_dpid = str_to_dpid(chassis_id[LLDPPacket.CHASSIS_ID_PREFIX_LEN:])
         return src_dpid
 
-
+#-------------------SimpleSwitch Class----------------------------------
 class SimpleSwitch13(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]  #OpenFlow 1.3v
 
@@ -122,7 +117,14 @@ class SimpleSwitch13(app_manager.RyuApp):
         self.mac_to_port = {}
         self.datapaths = {}
         self.datapaths_id = []
+        self.tStart = 0
+        self.tEnd = 0
+        #self.output = open('test_data/ofdp_round_time_tcp(50-2450).txt','w')
+        self.count = 0
+        self.round_count = 0
+        self.all_switches = 100
         self.monitor_thread = hub.spawn(self._monitor)
+        self.ev = hub.Event()
 
 
         #self.topology_api_app = self
@@ -151,7 +153,9 @@ class SimpleSwitch13(app_manager.RyuApp):
                 self.datapaths_id.append(datapath.id)
                 actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)]
                 self.add_flow(datapath,65535,match,actions)
-                self.add_flow(datapath,65535,parser.OFPMatch(),actions)
+                match = parser.OFPMatch()
+                actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)]
+                self.add_flow(datapath,0,parser.OFPMatch(),actions)
 
 
         elif ev.state == DEAD_DISPATCHER:
@@ -161,21 +165,28 @@ class SimpleSwitch13(app_manager.RyuApp):
 
     def _monitor(self):
         while True:
+            self.tStart = time.time()
             self._request_stats()
-            hub.sleep(1)
+            hub.sleep(5)
+
 
     def _request_stats(self):
-        if len(self.datapaths) >0:
+        if len(self.datapaths) >=self.all_switches:
+
                 #i is the index of switches
+                #self.count +=1
+                self.tStart = time.time()
                 for i in range(0,len(self.datapaths),1):
+
                     # j is the index of ports set,the total -1 is the last port is virtual port
                     for j in range(0,len(self.datapaths[self.datapaths_id[i]].ports)-1,1):
                         port_no = self.datapaths[self.datapaths_id[i]].ports.values()[j][0]
                         port_haddr = self.datapaths[self.datapaths_id[i]].ports.values()[j][1]
                         actions = [self.datapaths[self.datapaths_id[i]].ofproto_parser.OFPActionOutput(port_no)]
                         #send lldp packet to specify switch
-                        self.lldp_send(self.datapaths[self.datapaths_id[i]],int(port_no),
-                                            str(port_haddr),actions)
+                        self.lldp_send(self.datapaths[self.datapaths_id[i]],port_no,port_haddr,actions)
+                self.ev.wait()
+
 
     def add_flow(self, datapath, priority, match, actions, buffer_id=None):
         ofproto = datapath.ofproto
@@ -204,6 +215,7 @@ class SimpleSwitch13(app_manager.RyuApp):
 
 
 
+
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
         # If you hit this you might want to increase
@@ -222,7 +234,18 @@ class SimpleSwitch13(app_manager.RyuApp):
 
         if eth.ethertype == ether_types.ETH_TYPE_LLDP:
             # ignore lldp packet
-            print eth.ethertype
+            #self.logger.info("%x %s %s %x", datapath.id, in_port, pkt[1].tlvs[0].chassis_id.split(':')[1],pkt[1].tlvs[1].port_id[0])
+            #print datapath.id, in_port, pkt[1].tlvs[0].chassis_id.split(':')[1], pkt[1].tlvs[1].port_id
+            self.count+=1
+            if self.count == (self.switches*self.switches)-self.switches:
+                self.tEnd = time.time()
+                self.count = 0
+                self.round_count +=1
+                print self.round_count,self.tEnd - self.tStart
+                self.ev.set()
+                #self.output.write(str(self.tEnd - self.tStart)+'\n')
+            #print self.count
+
             return
         dst = eth.dst
         src = eth.src
@@ -233,7 +256,7 @@ class SimpleSwitch13(app_manager.RyuApp):
         self.logger.debug("packet in %s %s %s %s", dpid, src, dst, in_port)
 
         # learn a mac address to avoid FLOOD next time.
-        self.mac_to_port[dpid][src] = in_port
+        #self.mac_to_port[dpid][src] = in_port
 
         if dst in self.mac_to_port[dpid]:
             out_port = self.mac_to_port[dpid][dst]
@@ -252,11 +275,11 @@ class SimpleSwitch13(app_manager.RyuApp):
                 return
             else:
                 self.add_flow(datapath, 1, match, actions)
-		self.all_flow(datapath, 1, match, actions1)
+		self.add_flow(datapath, 1, match, actions)
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
             data = msg.data
 
         out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
                                   in_port=in_port, actions=actions, data=data)
-        datapath.send_msg(out)
+        #datapath.send_msg(out)
